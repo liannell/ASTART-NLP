@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import os
 import re
 import nltk
+nltk.download("all")
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
 from wordcloud import WordCloud
