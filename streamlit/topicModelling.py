@@ -21,11 +21,16 @@ import pyLDAvis.gensim_models as gensimvis
 import pyLDAvis
 import webbrowser
 from PIL import Image
+import random
+from transformers import pipeline
 
 st.set_page_config(layout="wide")
 #num_topics = 5
 vizFile = 'LDA_viz.html'
 wordcloudName= 'wordcloud.png'
+
+# Create the summarizer pipeline
+summarizer = pipeline("summarization", model="philschmid/bart-large-cnn-samsum")
 
 # Function to filter the DataFrame based on date range and star rating
 def filter_reviews(data, start_date, end_date, star_rating):
@@ -33,9 +38,6 @@ def filter_reviews(data, start_date, end_date, star_rating):
     return filtered_data
 
 # Function to display reviews in a scrollable window
-#def display_reviews(reviews):
-    #st.text_area("Reviews", "\n\n".join(reviews['reviews']), height=300)
-
 def display_reviews(reviews, keyword):
     if keyword:
         # Filter the DataFrame based on the keyword
@@ -62,7 +64,7 @@ def preprocess_corpus(data):
     processed_corpus = data.apply(lambda x: simple_preprocess(x))
     return processed_corpus
 
-
+# Bigrams and Vectors
 def create_bigrams(corpus):
     # Create a list to hold the bigram models
     corpus_bigrams = []
@@ -80,36 +82,40 @@ def create_dict_tfidf(corpus):
     dictionary = corpora.Dictionary(corpus)
     
     # create bag-of-words representation of the corpus
-    #bow_corpus = [dictionary.doc2bow(doc) for doc in corpus]
-    corpus_vecs = [dictionary.doc2bow(doc) for doc in corpus]
+    bow_corpus = [dictionary.doc2bow(doc) for doc in corpus]
     
     # create tf-idf model and convert the bow vector to tfidf vectors
-    #tfidf_model = models.TfidfModel(bow_corpus)
-    #tfidf_corpus = tfidf_model[bow_corpus]
+    tfidf_model = models.TfidfModel(bow_corpus)
+    tfidf_corpus = tfidf_model[bow_corpus]
+    
+    corpus_vecs = tfidf_corpus
     
     return dictionary, corpus_vecs
 
+# Lemmatization
 def lemmatize(tokenizedText):
     lemmatizer = WordNetLemmatizer()
     filteredTokens = [lemmatizer.lemmatize(token) for token in tokenizedText]
     return filteredTokens
 
+# LDA Model
 def train_lda_model(corpus, num_topics, dictionary):
     # Train lda model on tf-idf corpus
     lda_model = models.LdaModel(corpus=corpus,
                                 num_topics=num_topics,
                                 id2word=dictionary,
-                                passes=30)
+                                passes=20)
     
     return lda_model
 
 
+# WordCloud
 def generate_wordcloud(corpus_bigrams, wordcloudName):
     long_string = ' '.join(['_'.join(bigram.split(' ')) for doc_bigrams in corpus_bigrams for bigram in doc_bigrams])
     wordcloud = WordCloud(scale = 3,
         background_color='white',
-        max_words=200,
-        max_font_size=50,
+        max_words=300,
+        max_font_size=35,
         colormap='BrBG',
         random_state=42
                           
@@ -117,15 +123,78 @@ def generate_wordcloud(corpus_bigrams, wordcloudName):
     
     wordcloud.to_file(wordcloudName)
     
-
+# PyLDAvis
 def visualizeLDA(lda_model_gensim, corpus_vecs, dictionary, fileName):
     vis_data = gensimvis.prepare(lda_model_gensim, corpus_vecs, dictionary)
     pyLDAvis.save_html(vis_data, fileName)
     
+def generate_random_summary(corpus, length_limit):
+    if len(corpus) == 0:
+        return "Corpus is empty."
+
+    #article = ' '.join(corpus.apply(lambda x: ' '.join(x)))
+    #article = ' '.join(' '.join(x) for x in corpus)
+    
+    flattened_corpus = []
+    for doc in corpus:
+        if isinstance(doc, (list, tuple)):
+            flattened_corpus.extend(doc)
+        elif isinstance(doc, (float, int, str)):
+            flattened_corpus.append(str(doc))
+        else:
+            print(f"Unsupported data type: {type(doc)}")
+    
+    article = ' '.join(flattened_corpus)
+    article_length = len(article)
+
+    if article_length <= length_limit:
+        start_idx = 0
+        end_idx = article_length
+    else:
+        start_idx = random.randint(0, article_length - length_limit)
+        end_idx = start_idx + length_limit
+    
+    article_chunk = article[start_idx:end_idx]
+    
+    # Generate the summary using the pre-initialized summarizer pipeline
+    summary = summarizer(article_chunk, max_length=1000, min_length=50, do_sample=False)
+    
+    return summary[0]['summary_text']
+
+# Function to generate random summaries for each topic
+def generate_random_topic_summaries(topic_dataframes, length_limit):
+    topic_summaries = {}
+
+    for topic, dataframe in topic_dataframes.items():
+        reviews = dataframe['reviews']
+        random_summary = generate_random_summary(reviews, length_limit)
+        topic_summaries[topic] = random_summary
+
+    return topic_summaries
+
+
+def generate_topics_df(lda_model, corpus_vecs, num_topics):
+    # Assign topics to documents
+    document_topics = []
+    for i, doc in enumerate(corpus_vecs):
+        doc_topics = lda_model.get_document_topics(doc)
+        document_topics.append([prob for _, prob in doc_topics])
+
+    # Convert document_topics into a DataFrame
+    topics_df = pd.DataFrame(document_topics)
+
+    # Rename the columns to represent topics
+    topics_df.columns = [f"Topic{i+1}" for i in range(num_topics)]
+    
+    return topics_df
+
+
+
+### Main Execution    
 def main():
     
     # Set app title
-    st.title('Topic Analysis for Customer Reviews')
+    st.title('Automated Summary and Topic Analysis for Customer Reviews')
     
     PATH = os.getcwd()
 
@@ -193,7 +262,7 @@ def main():
     
     # Create the bigrams in the corpus
     corpus_bigrams = create_bigrams(preprocessed_corpus)
- 
+
     # Generate wordcloud
     generate_wordcloud(preprocessed_corpus, wordcloudName)
     
@@ -202,17 +271,40 @@ def main():
     
     # Train LDA MODEL
     lda_model_gensim = train_lda_model(corpus_vecs, num_topics, dictionary)
-
-    
+ 
     # Visualize pyLDAvis
     visualizeLDA(lda_model_gensim, corpus_vecs, dictionary, vizFile)
     
     
-    # Resize the image
+    # Assign topics to reviews
+    topics_df = generate_topics_df(lda_model_gensim, corpus_vecs, num_topics)
+    # Consolidate
+    processedReviews = preprocessed_corpus.rename('processedReviews')
+    reviewsNtopics = pd.concat([reviews['reviews'], processedReviews, topics_df], axis=1)
+    
+    # Generate a random summary for each topic on button click
+    
+    threshold = 1 / num_topics
+    topic_dataframes = {}
+
+    for column in topics_df.columns:
+        topic_reviews = reviewsNtopics[reviewsNtopics[column] >= threshold]  # Filter reviews with score greater than or equal to threshold
+        topic_dataframes[column] = topic_reviews
+    
+    # Button
+    # Generate a random summary for each topic on button click
+    if st.button("Generate Random Summaries for each topic"):
+        length_limit = 1000  # Adjust the length limit as needed
+        topic_summaries = generate_random_topic_summaries(topic_dataframes, length_limit)
+
+        # Display the random summaries
+        st.subheader("Random Summaries")
+        for topic, summary in topic_summaries.items():
+            st.write(f"Summary for {topic}: {summary}")
+    
+    # Wordcloud
     image = Image.open(wordcloudName)
     resized_image = image.resize((1000, 500))
-
-    # Display resized image
     st.subheader("Wordcloud")
     st.image(resized_image, use_column_width=True)
 
